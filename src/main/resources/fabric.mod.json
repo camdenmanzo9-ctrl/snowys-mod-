@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "id": "paydash",
+  "version": "${version}",
+  "name": "Snowy's Client",
+  "description": "Read-only payments and players dashboard (client-side).",
+  "environment": "client",
+  "entrypoints": { "client": ["com.snowy.paydash.PayDashClient"] },
+  "depends": { "fabricloader": ">=0.16.0", "minecraft": "~26.1", "java": ">=25", "fabric-api": "*" }
+}
