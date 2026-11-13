@@ -1,15 +1,19 @@
 package com.snowy.paydash;
 
 import net.fabricmc.api.ClientModInitializer;
+import com.mojang.blaze3d.platform.InputConstants;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.fabricmc.fabric.api.client.keymapping.v1.KeyMappingHelper;
 import net.fabricmc.fabric.api.client.message.v1.ClientReceiveMessageEvents;
 import net.fabricmc.fabric.api.client.message.v1.ClientSendMessageEvents;
 import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry;
 import net.fabricmc.loader.api.FabricLoader;
+import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.Font;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.gui.components.Button;
+import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.gui.components.PlayerFaceExtractor;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.resources.sounds.SimpleSoundInstance;
@@ -17,9 +21,12 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.FontDescription;
 import net.minecraft.network.chat.MutableComponent;
 import net.minecraft.network.chat.Style;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.Identifier;
 import net.minecraft.sounds.SoundEvent;
 import net.minecraft.sounds.SoundEvents;
+import net.minecraft.world.item.Item;
+import net.minecraft.world.item.ItemStack;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -42,7 +49,7 @@ import java.util.regex.Pattern;
  * Open it with /paydash   (also: /paydash reset   /paydash clear)
  */
 public class PayDashClient implements ClientModInitializer {
-    static final boolean USE_FONT = true;   // false = Minecraft's own font
+    static final boolean USE_FONT = false;   // false = Minecraft's own (normal) font
 
     // ---------- data ----------
     record Pay(long ts, boolean in, double amount, String name) {}
@@ -50,6 +57,7 @@ public class PayDashClient implements ClientModInitializer {
     static final List<Pay> PAYS = new ArrayList<>();      // oldest first
     static long sessionStart = System.currentTimeMillis();
     static boolean openRequested = false;
+    static KeyMapping OPEN_KEY;   // opens Snowy's Client (default N, change it in Controls)
 
     // ----- Streamers: on-screen text, win streak, payment popups, hiding small payments in chat -----
     static boolean ovOn = true, ovRight = true;
@@ -71,6 +79,10 @@ public class PayDashClient implements ClientModInitializer {
     static boolean hideOn = false, hideRecv = true, hideSent = true;
     static final double[] HIDE_MINS = {1e6, 10e6, 50e6, 100e6, 500e6, 1e9};
     static int hideMinIdx = 2;
+
+    // General look of the window
+    static int uiOpacity = 95, bright = 0;
+    static boolean skinFaces = true, bgCustom = false;
 
     // Win streak look
     static boolean wsAccentBar = true, wsBorder = false, wsSeparate = true, wsCmds = true;
@@ -102,11 +114,11 @@ public class PayDashClient implements ClientModInitializer {
     static boolean popFresh = false;
     // Colours: click a swatch to step through the palette
     static final int[] PAL = {0xFFFFC400, 0xFFFF8A00, 0xFFF14A7B, 0xFFFF4040, 0xFF7CFF3A, 0xFF59F58C, 0xFF40C8FF, 0xFFA27BFF, 0xFFFF8AC8, 0xFFFFFFFF,
-            0xFF9EA0B4, 0xFF4DA3FF, 0xFF8EC5FF, 0xFF0B0B14, 0xFF0B1220};
+            0xFF9EA0B4, 0xFF4DA3FF, 0xFF8EC5FF, 0xFF0B0B14, 0xFF0B1220, 0xFF1E1028, 0xFF0C0612, 0xFF160B35, 0xFF3B2080, 0xFF2D1B69, 0xFF050509};
     static final int K_GAIN = 0, K_LOSS = 1, K_ACCENT = 2, K_OVERLAY = 3, K_LABEL = 4, K_NUMBER = 5, K_NAME = 6, K_RECV = 7, K_SENT = 8, K_TAX = 9,
             K_TITLE = 10, K_ZERO = 11, K_PHBG = 12, K_PAMT = 13, K_PNAME = 14, K_PBG = 15, K_PBORDER = 16, K_TIMER = 17, K_CBG = 18, K_CNAME = 19,
-            K_CAMT = 20, K_CACCENT = 21, K_CCONFIRM = 22, K_CCANCEL = 23;
-    static final int[] CI = {5, 2, 7, 9, 10, 9, 1, 4, 3, 10, 12, 9, 14, 11, 12, 14, 7, 0, 14, 12, 3, 11, 11, 3};
+            K_CAMT = 20, K_CACCENT = 21, K_CCONFIRM = 22, K_CCANCEL = 23, K_BGTOP = 24, K_BGBOT = 25;
+    static final int[] CI = {5, 2, 7, 9, 10, 9, 1, 4, 3, 10, 12, 9, 14, 11, 12, 14, 7, 0, 14, 12, 3, 11, 11, 3, 15, 16};
     static int col(int k) { return PAL[CI[k]]; }
 
     static int hue(float h) {
@@ -148,13 +160,16 @@ public class PayDashClient implements ClientModInitializer {
     static Row rSwatch(String label, java.util.function.IntSupplier color, Runnable cycle) { return new Row(3, label, null, null, color, null, cycle); }
     static Row rWide(String label, Runnable action) { return new Row(4, label, null, null, null, null, action); }
 
+    static int parseNum(String s, int dflt, int lo, int hi) {
+        try { return clampI(Integer.parseInt(s.trim()), lo, hi); } catch (Exception e) { return dflt; }
+    }
+
     static int clampI(int v, int lo, int hi) { return Math.max(lo, Math.min(hi, v)); }
 
-    static final String[] SUB_NAMES = {"Chat colors", "Chat filter", "Profit HUD", "Win streak", "Popup alert", "Popup style", "Overlay", "Sounds", "Pay confirm"};
-    static final String[] SUB_TITLES = {"How payment messages look in chat", "Hide small payments in chat", "The profit of the last 24 hours box", "Win streak counter (/win and /lose)",
-            "The alert for big payments you receive", "Animations and looks of the popup alert", "Text lines on your screen", "Sound effects for alerts and confirmations",
-            "The screen that asks before a big /pay"};
-    static final int[] SUB_COLORS = {0xFF2F6B2F, 0xFF1A4F7A, 0xFF7A6A1A, 0xFF8A4B14, 0xFF8A2A6A, 0xFF6B3A66, 0xFF3B4EA8, 0xFF14706A, 0xFF8A2A2A};
+    static final String[] SUB_NAMES = {"General", "Chat colors", "Chat filter", "Profit HUD", "Win streak", "Popup alert", "Popup style", "Sounds", "Pay confirm"};
+    static final String[] SUB_TITLES = {"Look of the window", "How payment messages look in chat", "Hide small payments in chat", "The profit of the last 24 hours box", "Win streak counter (/win and /lose)",
+            "The alert for big payments you receive", "Animations and looks of the popup alert", "Sound effects for alerts and confirmations", "The screen that asks before a big /pay"};
+    static final int[] SUB_COLORS = {0xFF4A4F66, 0xFF2F6B2F, 0xFF1A4F7A, 0xFF7A6A1A, 0xFF8A4B14, 0xFF8A2A6A, 0xFF6B3A66, 0xFF14706A, 0xFF8A2A2A};
     static final List<List<Row>> SUBS = buildSubs();
 
     static Row rSwatchK(String label, int k) {
@@ -165,7 +180,14 @@ public class PayDashClient implements ClientModInitializer {
 
     static List<List<Row>> buildSubs() {
         List<List<Row>> all = new ArrayList<>();
-        // 0 chat colors
+        // 0 general
+        all.add(List.of(
+            rStep("Opacity", () -> uiOpacity + "%", () -> { uiOpacity = clampI(uiOpacity - 5, 30, 100); save(); }, () -> { uiOpacity = clampI(uiOpacity + 5, 30, 100); save(); }),
+            rStep("Brightness", () -> (bright > 0 ? "+" : "") + bright + "%", () -> { bright = clampI(bright - 10, -50, 50); save(); }, () -> { bright = clampI(bright + 10, -50, 50); save(); }),
+            rToggleB("Skin faces", () -> skinFaces, () -> skinFaces = !skinFaces),
+            rToggleB("Custom background", () -> bgCustom, () -> bgCustom = !bgCustom),
+            rSwatchK("Top color", K_BGTOP), rSwatchK("Bottom color", K_BGBOT)));
+        // 1 chat colors
         all.add(List.of(
             rToggleB("Chat colors", () -> ccOn, () -> ccOn = !ccOn),
             rToggleB("Show tax", () -> taxShow, () -> taxShow = !taxShow),
@@ -229,13 +251,6 @@ public class PayDashClient implements ClientModInitializer {
             rToggleB("Timer bar", () -> pupTimerBar, () -> pupTimerBar = !pupTimerBar),
             rSwatchK("Timer color", K_TIMER),
             rWide("Test popup", () -> addPopup("ExamplePlayer", 5e9, true))));
-        // 6 overlay
-        Runnable flipSide = () -> { ovRight = !ovRight; save(); };
-        all.add(List.of(
-            rToggleB("Show", () -> ovOn, () -> ovOn = !ovOn),
-            rStep("Size", () -> OV_SIZES[ovSizeIdx] + "x", () -> { ovSizeIdx = clampI(ovSizeIdx - 1, 0, OV_SIZES.length - 1); save(); }, () -> { ovSizeIdx = clampI(ovSizeIdx + 1, 0, OV_SIZES.length - 1); save(); }),
-            rPick(() -> "Side: " + (ovRight ? "Right" : "Left"), flipSide, flipSide),
-            rSwatchK("Color", K_OVERLAY)));
         // 7 sounds
         all.add(List.of(
             rToggleB("Popup sound", () -> sndOn, () -> sndOn = !sndOn),
@@ -316,23 +331,6 @@ public class PayDashClient implements ClientModInitializer {
         int sw = mc.getWindow().getGuiScaledWidth(), sh = mc.getWindow().getGuiScaledHeight();
         long now = System.currentTimeMillis();
 
-        if (ovOn) {
-            float sc = OV_SIZES[ovSizeIdx];
-            int yy = 10;
-            for (String line : OV_LINES) {
-                if (line.isEmpty()) continue;
-                int wpx = (int) (twb(f, line) * sc);
-                int xx = ovRight ? sw - 8 - wpx : 8;
-                g.pose().pushMatrix();
-                g.pose().translate(xx, yy);
-                g.pose().scale(sc, sc);
-                txb(g, f, line, 1, 1, 0xAA000000);
-                txb(g, f, line, 0, 0, col(K_OVERLAY));
-                g.pose().popMatrix();
-                yy += (int) (11 * sc) + 1;
-            }
-        }
-
         if (sndRepeatLeft > 0 && now >= sndNext) {
             playOnce();
             sndRepeatLeft--;
@@ -388,6 +386,43 @@ public class PayDashClient implements ClientModInitializer {
             g.pose().popMatrix();
         }
 
+        if (aucActive || aucEnded) {
+            if (aucActive && now >= aucEnd) finishAuction();
+            ItemStack st = aucStack();
+            int ccx = sw / 2, top = sh / 2 + 8;
+            int tcol = AUC_COLORS[aucColorIdx];
+            String title = (aucAmount > 1 ? aucAmount + "x " : "") + (aucName.isEmpty() ? "Auction" : aucName);
+            float ts = 1.5f;
+            int tw0 = (int) (twb(f, title) * ts);
+            g.pose().pushMatrix();
+            g.pose().translate(ccx - tw0 / 2f, top);
+            g.pose().scale(ts, ts);
+            txb(g, f, title, 1, 1, 0xAA000000);
+            txb(g, f, title, 0, 0, 0xFFFFFFFF);
+            g.pose().popMatrix();
+            if (!st.isEmpty()) {
+                g.pose().pushMatrix();
+                g.pose().translate(ccx - 24, top + 16);
+                g.pose().scale(3f, 3f);
+                g.fakeItem(st, 0, 0);
+                g.pose().popMatrix();
+            }
+            long left = aucActive ? (Math.max(0, aucEnd - now) + 999) / 1000 : 0;
+            String clk = clock(left);
+            float cs = 1.7f;
+            int cw0 = (int) (twb(f, clk) * cs);
+            g.pose().pushMatrix();
+            g.pose().translate(ccx - cw0 / 2f, top + 68);
+            g.pose().scale(cs, cs);
+            txb(g, f, clk, 1, 1, 0xAA000000);
+            txb(g, f, clk, 0, 0, tcol);
+            g.pose().popMatrix();
+            String info = aucTop == null ? (aucEnded ? "No bids" : "No bids yet") : (aucEnded ? "Winner: " : "") + aucTop + "  " + money2(aucTopBid);
+            int iw = tw(f, info);
+            tx(g, f, info, ccx - iw / 2 + 1, top + 90, 0xAA000000);
+            tx(g, f, info, ccx - iw / 2, top + 89, 0xFFFFFFFF);
+        }
+
         if (!pupOn) { POPS.clear(); popHeadStart = 0; }
         Pop p = POPS.peek();
         if (p != null) {
@@ -423,7 +458,7 @@ public class PayDashClient implements ClientModInitializer {
                 if (pupBorder > 0) frameN(g, x, y, popW, popH, pupBorder, alpha(bcol, a));
                 g.fill(x, y + 2, x + 2, y + popH - 2, alpha(accent, a));
                 int tx0 = x + 8;
-                if (pupFace) {
+                if (pupFace && skinFaces) {
                     var conn = mc.getConnection();
                     var info = conn == null ? null : conn.getPlayerInfo(p.name());
                     if (info != null) {
@@ -485,45 +520,88 @@ public class PayDashClient implements ClientModInitializer {
         return 0xFF000000 | ((int) (((c >> 16) & 255) * k) << 16) | ((int) (((c >> 8) & 255) * k) << 8) | (int) ((c & 255) * k);
     }
 
-    // Auctions: payments you receive while the timer runs are the bids. Highest single payment wins; a tie goes to the first payer.
-    record Auc(long ts, String item, int amount, String winner, double bid, int bidders, int timeIdx) {}
-
-    static final List<Auc> AUCS = new ArrayList<>();          // finished auctions, newest first
-    static String aucItem = "Item";
-    static int aucAmount = 1;
-    static final int[] AUC_TIMES = {30, 60, 120, 180, 300, 600};
-    static final double[] AUC_MINS = {0, 1e6, 5e6, 10e6, 25e6, 50e6, 100e6, 250e6, 500e6, 1e9};
-    static int aucTimeIdx = 2, aucMinIdx = 2;
-    static boolean aucActive = false, aucEnded = false, aucCutOff = true;
+    // Auctions: pick an item, set the seconds, start. Payments you receive while it runs are bids; the biggest single payment wins.
+    static String aucName = "", aucItemId = "";
+    static int aucAmount = 1, aucSeconds = 15, aucColorIdx = 1;
+    static boolean aucSwitch = true, aucActive = false, aucEnded = false;
     static long aucEnd = 0;
     static String aucTop = null;
     static double aucTopBid = 0;
-    static final java.util.Set<String> aucBidders = new java.util.HashSet<>();
+    static final java.util.LinkedHashMap<String, Double> aucBids = new java.util.LinkedHashMap<>();
+    static final int[] AUC_COLORS = {0xFFE8B84A, 0xFF8B5CF6, 0xFF4ADE80, 0xFFFF4D6D, 0xFF4D8BFF, 0xFFF472B6, 0xFF2DD4D4, 0xFFF2F2FA};
+
+    // every item and block in the game, built once
+    static final List<ItemStack> ITEMS = new ArrayList<>();
+    static final List<String> ITEM_NAMES = new ArrayList<>();   // lower case, for searching
+    static final List<String> ITEM_IDS = new ArrayList<>();
+    static String searchText = "", lastQuery = null;
+    static List<Integer> lastFiltered = new ArrayList<>();
+    static int lastCount = -1;
+
+    static void loadItems() {
+        if (!ITEMS.isEmpty()) return;
+        try {
+            for (Item it : BuiltInRegistries.ITEM) {
+                ItemStack st = new ItemStack(it);
+                if (st.isEmpty()) continue;
+                ITEMS.add(st);
+                ITEM_NAMES.add(st.getHoverName().getString().toLowerCase(Locale.ROOT));
+                ITEM_IDS.add(BuiltInRegistries.ITEM.getKey(it).toString());
+            }
+        } catch (Exception ignored) { }
+    }
+
+    static List<Integer> filteredItems() {
+        loadItems();
+        String q = searchText.trim().toLowerCase(Locale.ROOT);
+        if (q.equals(lastQuery) && lastCount == ITEMS.size()) return lastFiltered;
+        List<Integer> out = new ArrayList<>();
+        for (int i = 0; i < ITEMS.size(); i++) if (q.isEmpty() || ITEM_NAMES.get(i).contains(q) || ITEM_IDS.get(i).contains(q)) out.add(i);
+        lastQuery = q;
+        lastCount = ITEMS.size();
+        lastFiltered = out;
+        return out;
+    }
+
+    static ItemStack aucStack() {
+        loadItems();
+        int i = ITEM_IDS.indexOf(aucItemId);
+        return i >= 0 ? ITEMS.get(i) : ItemStack.EMPTY;
+    }
 
     static void startAuction() {
         if (aucActive) return;
         aucActive = true;
         aucEnded = false;
-        aucEnd = System.currentTimeMillis() + AUC_TIMES[aucTimeIdx] * 1000L;
+        aucEnd = System.currentTimeMillis() + aucSeconds * 1000L;
         aucTop = null;
         aucTopBid = 0;
-        aucBidders.clear();
+        aucBids.clear();
+        saveCtl();
+        save();
     }
 
     static void finishAuction() {
         if (!aucActive) return;
         aucActive = false;
         aucEnded = true;
-        AUCS.add(0, new Auc(System.currentTimeMillis(), aucItem, aucAmount, aucTop == null ? "-" : aucTop, aucTopBid, aucBidders.size(), aucTimeIdx));
-        while (AUCS.size() > 20) AUCS.remove(AUCS.size() - 1);
-        save();
+        saveCtl();
     }
 
-    static void ring(GuiGraphicsExtractor g, int cx, int cy, int r, double frac) {
+    static void clearAuction() {
+        aucActive = false;
+        aucEnded = false;
+        aucTop = null;
+        aucTopBid = 0;
+        aucBids.clear();
+        saveCtl();
+    }
+
+    static void ring(GuiGraphicsExtractor g, int cx, int cy, int r, double frac, int color) {
         for (int deg = 0; deg < 360; deg += 2) {
             double ang = Math.toRadians(deg);
             int rx = cx + (int) Math.round(r * Math.sin(ang)), ry = cy - (int) Math.round(r * Math.cos(ang));
-            g.fill(rx - 1, ry - 1, rx + 2, ry + 2, deg / 360.0 <= frac ? 0xFFF14A7B : 0x33FFFFFF);
+            g.fill(rx - 1, ry - 1, rx + 2, ry + 2, deg / 360.0 <= frac ? color : 0x33FFFFFF);
         }
     }
 
@@ -580,7 +658,7 @@ public class PayDashClient implements ClientModInitializer {
 
     static void saveCtl() {
         String t = "balance=" + (hudBalance ? 1 : 0) + "\nprofit=" + (hudProfit ? 1 : 0) + "\nrake=" + (hudRake ? 1 : 0)
-                + "\n";
+                + "\nauction=" + (aucActive && aucSwitch ? 1 : 0) + "\n";
         try { Files.writeString(CTL, t); } catch (Exception ignored) { }
     }
 
@@ -635,7 +713,7 @@ public class PayDashClient implements ClientModInitializer {
     }
 
     static Component fntB(String s) {
-        return USE_FONT ? Component.literal(s).withStyle(Style.EMPTY.withFont(FD).withBold(true)) : Component.literal(s);
+        return USE_FONT ? Component.literal(s).withStyle(Style.EMPTY.withFont(FD).withBold(true)) : Component.literal(s).withStyle(Style.EMPTY.withBold(true));
     }
 
     static int tw(Font f, String s) { return f.width(fnt(s)); }
@@ -739,6 +817,9 @@ public class PayDashClient implements ClientModInitializer {
         load();
         loadCtl();
 
+        OPEN_KEY = KeyMappingHelper.registerKeyMapping(new KeyMapping("key.paydash.open", InputConstants.Type.KEYSYM, InputConstants.KEY_N,
+                KeyMapping.Category.register(Identifier.fromNamespaceAndPath("paydash", "main"))));
+
         // Commands typed by you (never sent to the server)
         ClientSendMessageEvents.ALLOW_COMMAND.register(cmd -> {
             String[] a = cmd.trim().split("\\s+");
@@ -758,25 +839,14 @@ public class PayDashClient implements ClientModInitializer {
             }
             if (!a[0].equalsIgnoreCase("paydash")) return true;
             if (a.length < 2) {
-                openRequested = true;
+                // opening is done with the key now, not with a command
             } else if (a[1].equalsIgnoreCase("reset")) {
                 sessionStart = System.currentTimeMillis();
-                save();
-            } else if (a[1].equalsIgnoreCase("item") && a.length > 2) {
-                aucItem = String.join(" ", java.util.Arrays.copyOfRange(a, 2, a.length));
                 save();
             } else if (a[1].equalsIgnoreCase("win")) {
                 wsWin();
             } else if (a[1].equalsIgnoreCase("lose")) {
                 wsLose();
-            } else if (a[1].equalsIgnoreCase("line") && a.length > 2) {
-                try {
-                    int n = Integer.parseInt(a[2]);
-                    if (n >= 1 && n <= OV_LINES.length) {
-                        OV_LINES[n - 1] = String.join(" ", java.util.Arrays.copyOfRange(a, 3, a.length));
-                        save();
-                    }
-                } catch (Exception ignored) { }
             } else if (a[1].equalsIgnoreCase("clear")) {
                 PAYS.clear();
                 sessionStart = System.currentTimeMillis();
@@ -804,13 +874,16 @@ public class PayDashClient implements ClientModInitializer {
 
         // Open the screen on the next tick (after the chat box has closed)
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
-            if (aucActive && aucCutOff && System.currentTimeMillis() >= aucEnd) finishAuction();
+            if (aucActive && System.currentTimeMillis() >= aucEnd) finishAuction();
             if (pendingPay != null && (client.screen == null || pendingTest)) {
                 String[] pp = pendingPay;
                 boolean tst = pendingTest;
                 pendingPay = null;
                 pendingTest = false;
                 client.setScreen(new PayConfirmScreen(pp[0], pp[1], pp[2], tst));
+            }
+            while (OPEN_KEY.consumeClick()) {
+                if (client.screen == null) client.setScreen(new DashScreen());
             }
             if (openRequested && client.screen == null) {
                 openRequested = false;
@@ -885,8 +958,8 @@ public class PayDashClient implements ClientModInitializer {
         PAYS.add(pay);
         boolean in = pay.in();
         double v = pay.amount();
-        if (in && aucActive && (!aucCutOff || System.currentTimeMillis() <= aucEnd) && v > 0 && v >= AUC_MINS[aucMinIdx]) {
-            aucBidders.add(pay.name().toLowerCase());
+        if (in && aucActive && aucSwitch && System.currentTimeMillis() <= aucEnd && v > 0) {
+            aucBids.merge(pay.name(), v, Math::max);
             if (v > aucTopBid) { aucTopBid = v; aucTop = pay.name(); }   // strictly higher: a tie stays with the first payer
         }
         if (pupOn && v >= PUP_MINS[pupMinIdx] && (in || pupSent)) addPopup(pay.name(), v, in);
@@ -902,7 +975,8 @@ public class PayDashClient implements ClientModInitializer {
         StringBuilder sb = new StringBuilder();
         sb.append("s,").append(sessionStart).append('\n');
         sb.append("t,").append(theme).append('\n');
-        sb.append("c,").append(aucItem.replace(',', ';')).append(',').append(aucAmount).append(',').append(aucTimeIdx).append(',').append(aucMinIdx).append(',').append(aucCutOff ? 1 : 0).append('\n');
+        sb.append("u,").append(aucName.replace(',', ';')).append(',').append(aucItemId).append(',').append(aucAmount).append(',').append(aucSeconds)
+          .append(',').append(aucColorIdx).append(',').append(aucSwitch ? 1 : 0).append('\n');
         sb.append("x,").append(ovOn ? 1 : 0).append(',').append(ovRight ? 1 : 0).append(',').append(ovSizeIdx).append(',').append(wsOn ? 1 : 0).append(',')
           .append(wsStreak).append(',').append(wsBest).append(',').append(pupOn ? 1 : 0).append(',').append(pupSent ? 1 : 0).append(',')
           .append(pupMinIdx).append(',').append(pupSecIdx).append(',').append(hideOn ? 1 : 0).append(',').append(hideRecv ? 1 : 0).append(',')
@@ -914,16 +988,14 @@ public class PayDashClient implements ClientModInitializer {
           .append(CI[K_OVERLAY]).append(',').append(CI[K_LABEL]).append(',').append(CI[K_NUMBER]).append('\n');
         int[] wv = {wsSeparate ? 1 : 0, wsCmds ? 1 : 0, phOn ? 1 : 0, phAccent ? 1 : 0, phBorder ? 1 : 0, phSizeIdx, phOpacity, phPos, pupSparkles, pupSizeIdx,
                 pupFace ? 1 : 0, pupRainbow ? 1 : 0, pupShine ? 1 : 0, pupCountUp ? 1 : 0, pupBounce ? 1 : 0, ccOn ? 1 : 0, ccBoldNames ? 1 : 0, ccBoldAmts ? 1 : 0,
-                taxColor ? 1 : 0, taxShow ? 1 : 0, taxCount ? 1 : 0, taxPct, pcOn ? 1 : 0, pcRainbow ? 1 : 0, pcMinIdx, pcDelay, pcDim, cnfSndOn ? 1 : 0, cnfSndIdx};
+                taxColor ? 1 : 0, taxShow ? 1 : 0, taxCount ? 1 : 0, taxPct, pcOn ? 1 : 0, pcRainbow ? 1 : 0, pcMinIdx, pcDelay, pcDim, cnfSndOn ? 1 : 0, cnfSndIdx,
+                uiOpacity, bright, skinFaces ? 1 : 0, bgCustom ? 1 : 0};
         sb.append("w");
         for (int q : wv) sb.append(',').append(q);
         sb.append('\n').append("k");
         for (int q : CI) sb.append(',').append(q);
         sb.append('\n');
         for (int i = 0; i < OV_LINES.length; i++) sb.append("o,").append(i).append(',').append(OV_LINES[i].replace(',', ';')).append('\n');
-        for (Auc au : AUCS)
-            sb.append("a,").append(au.ts()).append(',').append(au.amount()).append(',').append(au.bid()).append(',').append(au.bidders()).append(',').append(au.timeIdx()).append(',')
-              .append(au.item().replace(',', ';')).append(',').append(au.winner()).append('\n');
         for (Pay p : PAYS)
             sb.append("p,").append(p.ts()).append(',').append(p.in() ? 1 : 0).append(',').append(p.amount()).append(',').append(p.name()).append('\n');
         try { Files.writeString(CFG, sb.toString()); } catch (Exception ignored) { }
@@ -968,13 +1040,17 @@ public class PayDashClient implements ClientModInitializer {
                         taxPct = clampI(Integer.parseInt(p[22]), 0, 100); pcOn = p[23].equals("1"); pcRainbow = p[24].equals("1");
                         pcMinIdx = clampI(Integer.parseInt(p[25]), 0, PC_MINS.length - 1); pcDelay = clampI(Integer.parseInt(p[26]), 0, 30); pcDim = clampI(Integer.parseInt(p[27]), 0, 90);
                         cnfSndOn = p[28].equals("1"); cnfSndIdx = clampI(Integer.parseInt(p[29]), 0, SND_NAMES.length - 1);
+                        if (p.length > 33) { uiOpacity = clampI(Integer.parseInt(p[30]), 30, 100); bright = clampI(Integer.parseInt(p[31]), -50, 50); skinFaces = p[32].equals("1"); bgCustom = p[33].equals("1"); }
                     }
                     else if (p[0].equals("k")) {
                         for (int i = 0; i < CI.length && i + 1 < p.length; i++) CI[i] = clampI(Integer.parseInt(p[i + 1]), 0, PAL.length - 1);
                     }
                     else if (p[0].equals("o")) { int n = Integer.parseInt(p[1]); if (n >= 0 && n < OV_LINES.length) OV_LINES[n] = p.length > 2 ? p[2] : ""; }
-                    else if (p[0].equals("c")) { aucItem = p[1]; aucAmount = Integer.parseInt(p[2]); aucTimeIdx = Integer.parseInt(p[3]); aucMinIdx = Integer.parseInt(p[4]); if (p.length > 5) aucCutOff = p[5].equals("1"); }
-                    else if (p[0].equals("a")) AUCS.add(new Auc(Long.parseLong(p[1]), p[6], Integer.parseInt(p[2]), p[7], Double.parseDouble(p[3]), Integer.parseInt(p[4]), Math.max(0, Math.min(AUC_TIMES.length - 1, Integer.parseInt(p[5])))));
+                    else if (p[0].equals("u")) {
+                        aucName = p[1]; aucItemId = p.length > 2 ? p[2] : ""; aucAmount = clampI(Integer.parseInt(p[3]), 1, 999);
+                        aucSeconds = clampI(Integer.parseInt(p[4]), 5, 3600); aucColorIdx = clampI(Integer.parseInt(p[5]), 0, AUC_COLORS.length - 1);
+                        aucSwitch = p[6].equals("1");
+                    }
                     else if (p[0].equals("p")) PAYS.add(new Pay(Long.parseLong(p[1]), p[2].equals("1"), Double.parseDouble(p[3]), p[4]));
                 } catch (Exception ignored) { }
             }
@@ -1065,7 +1141,9 @@ public class PayDashClient implements ClientModInitializer {
 
     static void backdrop(GuiGraphicsExtractor g, int x, int y, int w, int h) {
         int[] t = THEME_COL[theme];
-        switch (t[2]) {
+        if (bgCustom) {
+            forest(g, x, y, w, h, col(K_BGTOP), col(K_BGBOT));
+        } else switch (t[2]) {
             case 1 -> winter(g, x, y, w, h, t[0], t[1]);
             case 2 -> aurora(g, x, y, w, h, t[0], t[1]);
             case 3 -> city(g, x, y, w, h, t[0], t[1]);
@@ -1078,6 +1156,7 @@ public class PayDashClient implements ClientModInitializer {
             case 10 -> snowman(g, x, y, w, h, t[0], t[1]);
             default -> forest(g, x, y, w, h, t[0], t[1]);
         }
+        if (bright != 0) g.fill(x, y, x + w, y + h, bright < 0 ? alpha(0xFF000000, -bright / 100.0) : alpha(0xFFFFFFFF, bright / 250.0));
     }
 
     // Christmas tree with lights, a star and a few gifts, in falling snow.
@@ -1400,7 +1479,11 @@ public class PayDashClient implements ClientModInitializer {
         int filter = 0;   // 0 all, 1 in, 2 out
         int page = 0;
         int stSub = 0;               // Streamers: selected sub-tab
-        boolean histOpen = false;   // Auctions: the history bar starts closed
+        int itemPage = 0;            // Auctions: page of the item picker
+        long animAt = 0;             // when the current section was opened (for the reveal)
+        int lastTab = -1, lastSub = -1;
+        float mvx = -1, mvy = -1;    // mouse position in window coordinates
+        EditBox searchBox, nameBox, qtyBox, secBox;
         int px, py, pw, ph;
         float k = 1f, ox = 0f, oy = 0f;   // the whole window is drawn at the size that fits your screen (any GUI scale)
 
@@ -1422,16 +1505,36 @@ public class PayDashClient implements ClientModInitializer {
             btns.add(new Btn(b, "", state, visible, true, x, y, w, h));
         }
 
+        EditBox makeBox(int vx, int vy, int vw, int vh, String hint, int max, String value, java.util.function.Consumer<String> onChange) {
+            EditBox eb = new EditBox(this.font, Math.round(ox + (vx + 4) * k), Math.round(oy + (vy + 3) * k),
+                    Math.max(8, Math.round((vw - 8) * k)), Math.max(8, Math.round((vh - 6) * k)), Component.empty());
+            eb.setBordered(false);
+            eb.setMaxLength(max);
+            eb.setHint(Component.literal(hint));
+            eb.setValue(value);
+            eb.setResponder(onChange);
+            this.addWidget(eb);
+            return eb;
+        }
+
+        void pickItem(int ii) {
+            aucItemId = ITEM_IDS.get(ii);
+            String nm = ITEMS.get(ii).getHoverName().getString();
+            aucName = nm;
+            if (nameBox != null) nameBox.setValue(nm);
+            save();
+        }
+
         @Override
         protected void init() {
             btns.clear();
-            k = Math.max(0.7f, Math.min(2.2f, Math.min((this.width - 16) / 520f, (this.height - 16) / 270f)));
-            pw = 520;
-            ph = 270;
+            k = Math.max(0.7f, Math.min(2.2f, Math.min(this.width / 520f, this.height / 270f)));
+            pw = (int) Math.ceil(this.width / k);   // the window covers the whole screen
+            ph = (int) Math.ceil(this.height / k);
             px = 0;
             py = 0;
-            ox = (this.width - 520 * k) / 2f;
-            oy = (this.height - 270 * k) / 2f;
+            ox = 0f;
+            oy = 0f;
 
             add("DASHBOARD", px + 8, py + 44, 64, 16, () -> tab == 4, () -> true, () -> { tab = 4; page = 0; });
             add("PAYMENTS", px + 8, py + 64, 64, 16, () -> tab == 0, () -> true, () -> { tab = 0; page = 0; });
@@ -1465,39 +1568,35 @@ public class PayDashClient implements ClientModInitializer {
             add("<", px + pw - 62, py + ph - 20, 18, 13, () -> false, () -> tab != 2 && tab != 4 && tab != 5 && tab != 6 && tab != 7, () -> { if (page > 0) page--; });
             add(">", px + pw - 26, py + ph - 20, 18, 13, () -> false, () -> tab != 2 && tab != 4 && tab != 5 && tab != 6 && tab != 7, () -> page++);
 
-            // auction controls
-            int ax0 = px + 86, ax1 = px + pw - 8, amw = ax1 - ax0;
-            int aMainW = (amw - 6) * 60 / 100, aSetW = amw - 6 - aMainW;
-            int asx = ax0 + aMainW + 6, asr = asx + aSetW;
-            int aTop = py + 84;
-            BooleanSupplier ready = () -> tab == 5 && !aucActive && !aucEnded;
-            add("-", asr - 62, aTop + 33, 14, 12, () -> false, ready, () -> { aucAmount = Math.max(1, aucAmount - 1); save(); });
-            add("+", asr - 22, aTop + 33, 14, 12, () -> false, ready, () -> { aucAmount = Math.min(64, aucAmount + 1); save(); });
-            add("-", asr - 62, aTop + 48, 14, 12, () -> false, ready, () -> { aucTimeIdx = Math.max(0, aucTimeIdx - 1); save(); });
-            add("+", asr - 22, aTop + 48, 14, 12, () -> false, ready, () -> { aucTimeIdx = Math.min(AUC_TIMES.length - 1, aucTimeIdx + 1); save(); });
-            add("-", asr - 62, aTop + 63, 14, 12, () -> false, ready, () -> { aucMinIdx = Math.max(0, aucMinIdx - 1); save(); });
-            add("+", asr - 22, aTop + 63, 14, 12, () -> false, ready, () -> { aucMinIdx = Math.min(AUC_MINS.length - 1, aucMinIdx + 1); save(); });
-            addToggle(asr - 8 - 34, aTop + 79, 34, 12, () -> aucCutOff, ready, () -> { aucCutOff = !aucCutOff; save(); });
-            add("START AUCTION", asx + 8, aTop + 95, aSetW - 16, 12, () -> false, ready, () -> startAuction());
-            add("FINISH", asx + 8, aTop + 95, aSetW - 16, 12, () -> false, () -> tab == 5 && aucActive, () -> finishAuction());
-            add("NEW AUCTION", asx + 8, aTop + 95, aSetW - 16, 12, () -> false, () -> tab == 5 && aucEnded && !aucActive, () -> { aucEnded = false; });
-            int hyI = aTop + 110 + 8;
-            add("SHOW", ax1 - 38, hyI - 2, 34, 12, () -> false, () -> tab == 5 && !histOpen, () -> histOpen = true);
-            add("HIDE", ax1 - 38, hyI - 2, 34, 12, () -> false, () -> tab == 5 && histOpen, () -> histOpen = false);
-            // recent rounds: click one to fill the setup
-            int chipW = Math.min(110, (amw - 12) / 3);
-            for (int i = 0; i < 3; i++) {
-                final int ci = i;
-                add("#chip", ax0 + i * (chipW + 6), py + 64, chipW, 14, () -> false, () -> tab == 5 && !aucActive && ci < AUCS.size(), () -> {
-                    Auc au = AUCS.get(ci);
-                    aucItem = au.item();
-                    aucAmount = au.amount();
-                    aucTimeIdx = au.timeIdx();
-                    aucEnded = false;
-                    save();
-                });
+            // auctions: text boxes, item picker and buttons
+            int aX0 = px + 86, aMW = pw - 94, aLW = 190, aRX = aX0 + aLW + 8, aRW = aMW - aLW - 8;
+            searchBox = makeBox(aRX + 8, py + 70, aRW - 16, 14, "Search every item and block...", 40, searchText, t -> { searchText = t; itemPage = 0; });
+            nameBox = makeBox(aX0, py + 174, 100, 14, "Item name", 32, aucName, t -> { aucName = t; save(); });
+            qtyBox = makeBox(aX0 + 106, py + 174, 40, 14, "1", 3, String.valueOf(aucAmount), t -> { aucAmount = parseNum(t, aucAmount, 1, 999); save(); });
+            secBox = makeBox(aX0 + 150, py + 174, 40, 14, "15", 4, String.valueOf(aucSeconds), t -> { aucSeconds = parseNum(t, aucSeconds, 5, 3600); save(); });
+            qtyBox.setFilter(t -> t.matches("\\d{0,3}"));
+            secBox.setFilter(t -> t.matches("\\d{0,4}"));
+            BooleanSupplier aucVis = () -> tab == 5;
+            add("START AUCTION", aX0, py + 142, 118, 18, () -> false, () -> tab == 5 && !aucActive, () -> { if (!aucItemId.isEmpty()) startAuction(); });
+            add("CANCEL", aX0, py + 142, 118, 18, () -> false, () -> tab == 5 && aucActive, () -> finishAuction());
+            add("Clear", aX0 + 124, py + 142, 66, 18, () -> false, aucVis, () -> { clearAuction(); aucItemId = ""; save(); });
+            for (int i = 0; i < AUC_COLORS.length; i++) {
+                final int di = i;
+                add("#dot", aX0 + 4 + i * 14, py + 202, 12, 12, () -> false, aucVis, () -> { aucColorIdx = di; save(); });
             }
-
+            addToggle(aX0 + aLW - 8 - 36, py + 220 + 12, 36, 12, () -> aucSwitch, aucVis, () -> { aucSwitch = !aucSwitch; saveCtl(); save(); });
+            final int cols = Math.max(1, (aRW - 16) / 22);
+            final int per = cols * 4;
+            for (int i = 0; i < per; i++) {
+                final int ci = i;
+                add("#cell", aRX + 8 + (i % cols) * 22, py + 90 + (i / cols) * 22, 20, 20, () -> false,
+                        () -> tab == 5 && itemPage * per + ci < filteredItems().size(), () -> pickItem(filteredItems().get(itemPage * per + ci)));
+            }
+            add("<", aRX + aRW - 8 - 30, py + 176, 14, 12, () -> false, aucVis, () -> { if (itemPage > 0) itemPage--; });
+            add(">", aRX + aRW - 8 - 14, py + 176, 14, 12, () -> false, aucVis, () -> {
+                int pages = Math.max(1, (filteredItems().size() + per - 1) / per);
+                if (itemPage < pages - 1) itemPage++;
+            });
             // theme grid (Themes page): one invisible button per theme
             int gx0 = px + 86, gmw = pw - 94, gCell = (gmw - 8) / 3;
             for (int i = 0; i < THEME_NAMES.length; i++) {
@@ -1563,34 +1662,93 @@ public class PayDashClient implements ClientModInitializer {
             return out;
         }
 
+        EditBox[] boxes() { return new EditBox[]{searchBox, nameBox, qtyBox, secBox}; }
+
         @Override
         public void extractRenderState(GuiGraphicsExtractor g, int mouseX, int mouseY, float delta) {
-            super.extractRenderState(g, mouseX, mouseY, delta);
-            g.enableScissor((int) ox, (int) oy, (int) Math.ceil(ox + pw * k), (int) Math.ceil(oy + ph * k));
+            boolean auc = tab == 5;
+            for (Btn b : btns) b.w().visible = b.visible().getAsBoolean();   // hidden buttons must not catch clicks
+            for (EditBox eb : boxes()) {
+                if (eb == null) continue;
+                eb.visible = auc;
+                if (!auc && eb.isFocused()) eb.setFocused(false);
+            }
+            mvx = (mouseX - ox) / k;
+            mvy = (mouseY - oy) / k;
+            long now = System.currentTimeMillis();
+            int sk = tab == 7 ? stSub : -1;
+            if (tab != lastTab || sk != lastSub) { lastTab = tab; lastSub = sk; animAt = now; }
+            double an = Math.min(1.0, (now - animAt) / 450.0), ease = 1 - Math.pow(1 - an, 3);
+
+            // the backdrop covers the whole screen
+            g.enableScissor(0, 0, this.width, this.height);
             g.pose().pushMatrix();
             g.pose().translate(ox, oy);
             g.pose().scale(k, k);
             backdrop(g, px, py, pw, ph);
             g.pose().popMatrix();
             g.disableScissor();
+
+            // fixed parts: frame, sidebar, titles
             g.pose().pushMatrix();
             g.pose().translate(ox, oy);
             g.pose().scale(k, k);
-            drawPage(g);
+            drawChrome(g);
             g.pose().popMatrix();
+
+            // the page reveals itself (wipe and slide) whenever you open a section
+            boolean reveal = an < 1.0;
+            if (reveal) g.enableScissor((int) (ox + (px + 80) * k), (int) oy, this.width, (int) (oy + ph * ease * k) + 1);
+            g.pose().pushMatrix();
+            g.pose().translate(ox, oy + (float) ((1 - ease) * 10 * k));
+            g.pose().scale(k, k);
+            drawContent(g);
+            g.pose().popMatrix();
+            if (reveal) g.disableScissor();
+
+            if (auc) for (EditBox eb : boxes()) if (eb != null) eb.extractRenderState(g, mouseX, mouseY, delta);
         }
 
-        void drawPage(GuiGraphicsExtractor g) {
+        void drawChrome(GuiGraphicsExtractor g) {
             Font f = this.font;
-            List<Pay> v = view();
-
-            // window + sidebar
+            double op = uiOpacity / 100.0;
             frame(g, px, py, pw, ph, EDGE);
-            g.fill(px + 1, py + 1, px + 78, py + ph - 1, SIDE);
-            g.fillGradient(px + 80, py + 28, px + pw - 1, py + ph - 1, 0xC00A0614, 0x550A0614);   // keeps the text readable; the trees show through lower down
-
+            g.fill(px + 1, py + 1, px + 78, py + ph - 1, alpha(SIDE, op));
+            g.fillGradient(px + 80, py + 1, px + pw - 1, py + ph - 1, alpha(0xFF0A0614, 0.92 * op), alpha(0xFF0A0614, 0.74 * op));
+            g.fill(px + 80, py + 26, px + pw - 1, py + 27, EDGE);
             spaced(g, f, "SNOWY'S", px + 8, py + 12, TITLE);
             spaced(g, f, "CLIENT", px + 8, py + 22, TITLE);
+            drawButtons(g, f, true);
+        }
+
+        void drawButtons(GuiGraphicsExtractor g, Font f, boolean sidebar) {
+            for (Btn b : btns) {
+                if (!b.visible().getAsBoolean()) continue;
+                if ((b.vx() < px + 80) != sidebar) continue;
+                String lb = b.label();
+                if (lb.equals("#chip") || lb.equals("#theme") || lb.equals("#sub") || lb.equals("#swatch") || lb.equals("#dot") || lb.equals("#cell")) continue;
+                int bx = b.vx(), by = b.vy(), bw = b.vw(), bh = b.vh();
+                boolean act = b.active().getAsBoolean();
+                boolean hov = mvx >= bx && mvx < bx + bw && mvy >= by && mvy < by + bh;
+                if (b.toggle()) {
+                    pill(g, bx, by, bw, bh, act ? PURPLE : 0xFF241C3E);
+                    int kr = bh / 2 - 2;
+                    int kcx = act ? bx + bw - bh / 2 : bx + bh / 2;
+                    disc(g, kcx, by + bh / 2, kr, act ? 0xFF14102A : MUTED);
+                    continue;
+                }
+                boolean danger = lb.equals("RESET SESSION");
+                rrect(g, bx, by, bw, bh, act ? PURPLE : (hov ? 0xFF1F1740 : CARD));
+                frame(g, bx, by, bw, bh, danger ? RED : (act ? PURPLE_EDGE : (hov ? 0xFF6B54B5 : EDGE)));
+                int col = danger ? RED : (act ? WHITE : (hov ? WHITE : MUTED));
+                int lw = (int) (twb(f, lb) * 0.7f);
+                small(g, f, lb, bx + (bw - lw) / 2, by + (bh - 6) / 2, col, true);
+            }
+        }
+
+        void drawContent(GuiGraphicsExtractor g) {
+            Font f = this.font;
+            List<Pay> v = view();
 
             int x0 = px + 86, x1 = px + pw - 8, mw = x1 - x0;
 
@@ -1598,19 +1756,19 @@ public class PayDashClient implements ClientModInitializer {
             if (tab == 4) {
                 // welcome banner: your own skin and name
                 Minecraft m2 = Minecraft.getInstance();
-                if (m2.player != null) PlayerFaceExtractor.extractRenderState(g, m2.player.getSkin(), x0, py + 28, 20);
+                if (skinFaces && m2.player != null) PlayerFaceExtractor.extractRenderState(g, m2.player.getSkin(), x0, py + 30, 20);
                 g.pose().pushMatrix();
-                g.pose().translate(x0 + 26, py + 28);
+                g.pose().translate(x0 + 26, py + 30);
                 g.pose().scale(1.3f, 1.3f);
                 txb(g, f, "Welcome,", 0, 0, WHITE);
                 int nx = twb(f, "Welcome, ");
                 for (int[] o : new int[][]{{-1, 0}, {1, 0}, {0, -1}, {0, 1}}) txb(g, f, "2amsnowy", nx + o[0], o[1], 0x40B48CFF);   // soft glow
                 txb(g, f, "2amsnowy", nx, 0, 0xFFC6A6FF);
                 g.pose().popMatrix();
-                small(g, f, "Here is how your payments look.", x0 + 26, py + 43, MUTED, false);
+                small(g, f, "Here is how your payments look.", x0 + 26, py + 44, MUTED, false);
             } else {
-                spaced(g, f, tab == 7 ? "STREAMERS" : tab == 6 ? "THEMES" : tab == 5 ? "AUCTIONS" : tab == 4 ? "DASHBOARD" : (tab == 0 ? "PAYMENTS" : (tab == 1 ? "PLAYERS" : (tab == 3 ? "RAKEBACK" : "SETTINGS"))), x0, py + 28, WHITE);
-            small(g, f, tab == 7 ? "Tools for your stream. Nothing here sends chat or commands." : tab == 6 ? "Pick a backdrop. Only the picture behind the panels changes." : tab == 5 ? "Payments you receive count as bids. The highest single payment wins." : tab == 4 ? "A quick look at your payments." : tab == 0 ? "Every payment you sent or received." : (tab == 1 ? "Everyone you have traded with." : (tab == 3 ? "Read from your balance HUD mod. Closest to the minimum first." : "Turn the balance HUD panels on or off.")), x0, py + 42, MUTED, false);
+                spaced(g, f, tab == 7 ? "STREAMERS" : tab == 6 ? "THEMES" : tab == 5 ? "AUCTIONS" : tab == 4 ? "DASHBOARD" : (tab == 0 ? "PAYMENTS" : (tab == 1 ? "PLAYERS" : (tab == 3 ? "RAKEBACK" : "SETTINGS"))), x0, py + 31, WHITE);
+            small(g, f, tab == 7 ? "Tools for your stream. Nothing here sends chat or commands." : tab == 6 ? "Pick a backdrop. Only the picture behind the panels changes." : tab == 5 ? "Payments you receive count as bids. The highest single payment wins." : tab == 4 ? "A quick look at your payments." : tab == 0 ? "Every payment you sent or received." : (tab == 1 ? "Everyone you have traded with." : (tab == 3 ? "Read from your balance HUD mod. Closest to the minimum first." : "Turn the balance HUD panels on or off.")), x0, py + 43, MUTED, false);
             }
 
             int rowsPer = Math.max(1, (ph - 140) / 14);
@@ -1798,163 +1956,89 @@ public class PayDashClient implements ClientModInitializer {
             } else if (tab == 5) {
                 // ---- auctions ----
                 long nowMs = System.currentTimeMillis();
-                if (aucActive && aucCutOff && nowMs >= aucEnd) finishAuction();
-                int mainW = (mw - 6) * 60 / 100, setW = mw - 6 - mainW;
-                int sx = x0 + mainW + 6, sr = sx + setW;
-                int top = py + 84, ph2 = 110;
-                boolean readyState = !aucActive && !aucEnded;
+                if (aucActive && nowMs >= aucEnd) finishAuction();
+                int aX0 = x0, aLW = 190, aRX = aX0 + aLW + 8, aRW = mw - aLW - 8;
+                int tcol = AUC_COLORS[aucColorIdx];
+                loadItems();
+                boolean noItem = aucItemId.isEmpty() && !aucActive && !aucEnded;
 
-                // recent rounds (click one to fill the setup)
-                if (!aucActive) {
-                    small(g, f, "RECENT ROUNDS", x0, py + 55, MUTED, true);
-                    small(g, f, "click one to fill the setup", x0 + 62, py + 55, MUTED, false);
-                    int chipW = Math.min(110, (mw - 12) / 3);
-                    if (AUCS.isEmpty()) tx(g, f, "None yet", x0, py + 66, MUTED);
-                    for (int i = 0; i < 3 && i < AUCS.size(); i++) {
-                        Auc ch2 = AUCS.get(i);
-                        int chx = x0 + i * (chipW + 6);
-                        rrect(g, chx, py + 64, chipW, 14, CARD);
-                        frame(g, chx, py + 64, chipW, 14, EDGE);
-                        String lab = "x" + ch2.amount() + " " + ch2.item() + "  " + clock(AUC_TIMES[ch2.timeIdx()]);
-                        tx(g, f, fit(f, lab, chipW - 10), chx + 5, py + 67, WHITE);
-                    }
-                }
+                // left: the status card with the countdown ring
+                rrect(g, aX0, py + 54, aLW, 82, CARD);
+                int mid = aX0 + aLW / 2;
+                int hw = 0;
+                for (char c2 : "AUCTIONS".toCharArray()) hw += twb(f, String.valueOf(c2)) + 1;
+                spaced(g, f, "AUCTIONS", mid - hw / 2, py + 60, tcol);
+                long leftS = aucActive ? (Math.max(0, aucEnd - nowMs) + 999) / 1000 : (aucEnded ? 0 : aucSeconds);
+                double frac = aucActive ? Math.max(0, Math.min(1.0, (aucEnd - nowMs) / (aucSeconds * 1000.0))) : (aucEnded ? 0 : 1.0);
+                ring(g, mid, py + 94, 20, frac, tcol);
+                String ringText = noItem ? "PICK" : clock(leftS);
+                txb(g, f, ringText, mid - twb(f, ringText) / 2, py + 90, WHITE);
+                String cap = noItem ? "Pick an item on the right"
+                        : (aucTop != null ? aucTop + "  " + money2(aucTopBid)
+                        : (aucActive ? "No bids yet" : (aucEnded ? "No bids" : (aucAmount > 1 ? aucAmount + "x " : "") + aucName)));
+                String capFit = fit(f, cap, aLW - 12);
+                txb(g, f, capFit, mid - twb(f, capFit) / 2, py + 122, WHITE);
 
-                rrect(g, x0, top, mainW, ph2, CARD);
-                rrect(g, sx, top, setW, ph2, CARD);
-                g.fill(x0 + 2, top, x0 + mainW - 2, top + 1, aucActive || aucEnded ? PINK : PURPLE_EDGE);
-
-                // status, countdown, item, top bid
-                String st = aucActive ? "RUNNING" : (aucEnded ? "ENDED" : "READY");
-                spaced(g, f, readyState ? "AUCTION" : "AUCTION  " + st, x0 + 8, top + 7, aucActive || aucEnded ? PINK : MUTED);
-                long leftS = aucActive ? (Math.max(0, aucEnd - nowMs) + 999) / 1000 : (aucEnded ? 0 : AUC_TIMES[aucTimeIdx]);
-                g.pose().pushMatrix();
-                g.pose().translate(x0 + 8, top + 19);
-                g.pose().scale(2.4f, 2.4f);
-                txb(g, f, readyState ? "READY" : clock(leftS), 0, 0, PINK);
-                g.pose().popMatrix();
-                txb(g, f, fit(f, "x" + aucAmount + " " + aucItem, mainW - 16), x0 + 8, top + 48, WHITE);
-                if (aucTop != null) {
-                    String tb = money2(aucTopBid);
-                    tx(g, f, fit(f, aucTop, mainW - 24 - twb(f, tb)), x0 + 8, top + 62, WHITE);
-                    txb(g, f, tb, x0 + mainW - 8 - twb(f, tb), top + 62, GREEN);
-                    small(g, f, aucBidders.size() + (aucBidders.size() == 1 ? " bidder" : " bidders"), x0 + 8, top + 74, MUTED, false);
-                } else if (aucActive || aucEnded) {
-                    txb(g, f, "No bids yet", x0 + 8, top + 62, PINK);
-                    small(g, f, "0 bidders", x0 + 8, top + 74, MUTED, false);
-                } else {
-                    small(g, f, "Set the item and timer, then press START.", x0 + 8, top + 64, MUTED, false);
-                }
-                small(g, f, aucMinIdx == 0 ? "Any payment you receive counts as a bid." : "Payments under " + money(AUC_MINS[aucMinIdx]) + " do not count.", x0 + 8, top + 90, MUTED, false);
-
-                if (readyState) {
-                    // setup
-                    small(g, f, "ITEM", sx + 8, top + 7, MUTED, true);
-                    tx(g, f, fit(f, aucItem, setW - 16), sx + 8, top + 14, WHITE);
-                    small(g, f, "change with /paydash item <name>", sx + 8, top + 24, MUTED, false);
-                    String[] sl = {"AMOUNT", "TIMER", "MIN BID"};
-                    String[] sv = {String.valueOf(aucAmount), clock(AUC_TIMES[aucTimeIdx]), aucMinIdx == 0 ? "None" : money(AUC_MINS[aucMinIdx])};
-                    for (int i = 0; i < 3; i++) {
-                        int ry = top + 33 + i * 15;
-                        small(g, f, sl[i], sx + 8, ry + 3, MUTED, true);
-                        txb(g, f, sv[i], sr - 35 - twb(f, sv[i]) / 2, ry + 1, WHITE);
-                    }
-                    small(g, f, "CUT OFF AT ZERO", sx + 8, top + 82, MUTED, true);
-                } else {
-                    // control for the running or finished auction
-                    small(g, f, "CONTROL", sx + 8, top + 7, MUTED, true);
-                    small(g, f, "Control the running event here too.", sx + 8, top + 17, MUTED, false);
-                    int rcx = sx + setW / 2, rcy = top + 56;
-                    ring(g, rcx, rcy, 22, aucActive ? Math.max(0, Math.min(1.0, (aucEnd - nowMs) / (AUC_TIMES[aucTimeIdx] * 1000.0))) : 0);
-                    String rt = clock(leftS);
-                    txb(g, f, rt, rcx - twb(f, rt) / 2, rcy - 4, WHITE);
+                // fields
+                small(g, f, "NAME", aX0, py + 165, MUTED, true);
+                small(g, f, "QUANTITY", aX0 + 106, py + 165, MUTED, true);
+                small(g, f, "SECONDS", aX0 + 150, py + 165, MUTED, true);
+                int[][] fb = {{aX0, 100}, {aX0 + 106, 40}, {aX0 + 150, 40}};
+                EditBox[] fbx = {nameBox, qtyBox, secBox};
+                for (int i = 0; i < 3; i++) {
+                    rrect(g, fb[i][0], py + 174, fb[i][1], 14, 0xFF0B0816);
+                    frame(g, fb[i][0], py + 174, fb[i][1], 14, fbx[i] != null && fbx[i].isFocused() ? tcol : EDGE);
                 }
 
-                // history (a bar you can open and close)
-                int hy = top + ph2 + 8;
-                rrect(g, x0, hy - 4, mw, 16, CARD);
-                spaced(g, f, "HISTORY", x0 + 8, hy, WHITE);
-                small(g, f, AUCS.size() + (AUCS.size() == 1 ? " finished event" : " finished events"), x0 + 64, hy + 2, MUTED, false);
-                int hrows = histOpen ? Math.max(0, Math.min(5, Math.min(AUCS.size(), (py + ph - 8 - (hy + 20)) / 12))) : 0;
-                if (histOpen && AUCS.isEmpty()) tx(g, f, "No finished auctions yet.", x0 + 6, hy + 20, MUTED);
-                for (int i = 0; i < hrows; i++) {
-                    Auc au = AUCS.get(i);
-                    int ry = hy + 20 + i * 12;
-                    if (i % 2 == 0) g.fill(x0, ry - 2, x1, ry + 10, 0x14FFFFFF);
-                    tx(g, f, fit(f, "x" + au.amount() + " " + au.item(), mw * 34 / 100 - 8), x0 + 6, ry, WHITE);
-                    tx(g, f, fit(f, au.winner(), mw * 26 / 100), x0 + mw * 38 / 100, ry, MUTED);
-                    String bs = au.bid() > 0 ? money2(au.bid()) : "no bids";
-                    txb(g, f, bs, x0 + mw * 82 / 100 - twb(f, bs), ry, au.bid() > 0 ? GREEN : MUTED);
-                    String when = ago(au.ts());
-                    tx(g, f, when, x1 - 6 - tw(f, when), ry, MUTED);
+                // timer color
+                small(g, f, "TIMER COLOR", aX0, py + 194, MUTED, true);
+                for (int i = 0; i < AUC_COLORS.length; i++) {
+                    int dx = aX0 + 10 + i * 14, dy = py + 208;
+                    if (i == aucColorIdx) disc(g, dx, dy, 6, 0xFFFFFFFF);
+                    disc(g, dx, dy, 5, AUC_COLORS[i]);
                 }
-            } else if (tab == 7) {
-                // ---- streamers ----
-                int cx0 = x0 + 76, cwt = mw - 76, rowsTop = py + 72;
-                for (int k = 0; k < SUB_NAMES.length; k++) {
-                    int sy2 = py + 54 + k * 19;
-                    boolean sel = stSub == k;
-                    rrect(g, x0, sy2, 70, 16, sel ? SUB_COLORS[k] : alpha(SUB_COLORS[k], 0.5));
-                    if (sel) frame(g, x0, sy2, 70, 16, 0xFFFFFFFF);
-                    tx(g, f, SUB_NAMES[k], x0 + 6, sy2 + 4, WHITE);
+                small(g, f, String.format("#%06X", tcol & 0xFFFFFF), aX0 + 126, py + 206, MUTED, true);
+
+                // auction switch
+                rrect(g, aX0, py + 220, aLW, 36, CARD);
+                txb(g, f, "Auction switch", aX0 + 8, py + 224, WHITE);
+                small(g, f, "While it runs, payments to you", aX0 + 8, py + 237, MUTED, false);
+                small(g, f, "count as bids, not bets.", aX0 + 8, py + 245, MUTED, false);
+
+                // right: the item picker
+                rrect(g, aRX, py + 54, aRW, 134, CARD);
+                spaced(g, f, "PICK AN ITEM", aRX + 8, py + 59, WHITE);
+                rrect(g, aRX + 8, py + 70, aRW - 16, 14, 0xFF0B0816);
+                frame(g, aRX + 8, py + 70, aRW - 16, 14, searchBox != null && searchBox.isFocused() ? tcol : EDGE);
+                int cols = Math.max(1, (aRW - 16) / 22), per = cols * 4;
+                List<Integer> fl = filteredItems();
+                int pages = Math.max(1, (fl.size() + per - 1) / per);
+                if (itemPage >= pages) itemPage = pages - 1;
+                for (int i = 0; i < per; i++) {
+                    int idx = itemPage * per + i;
+                    if (idx >= fl.size()) break;
+                    int ii = fl.get(idx);
+                    int cx = aRX + 8 + (i % cols) * 22, cy = py + 90 + (i / cols) * 22;
+                    boolean sel = ITEM_IDS.get(ii).equals(aucItemId);
+                    boolean hovC = mvx >= cx && mvx < cx + 20 && mvy >= cy && mvy < cy + 20;
+                    rrect(g, cx, cy, 20, 20, sel ? 0xFF2A2048 : (hovC ? 0xFF1F1740 : 0xFF0F0B22));
+                    if (sel) frame(g, cx, cy, 20, 20, tcol);
+                    g.fakeItem(ITEMS.get(ii), cx + 2, cy + 2);
                 }
-                tx(g, f, SUB_TITLES[stSub], cx0, py + 54, MUTED);
-                g.fill(cx0, py + 66, cx0 + cwt, py + 67, EDGE);
-                List<Row> rs = SUBS.get(stSub);
-                int[][] lay = layout(rs, cx0, rowsTop, cwt);
-                for (int i = 0; i < rs.size(); i++) {
-                    Row r = rs.get(i);
-                    int[] bb = lay[i];
-                    if (r.type() == 4) continue;
-                    rrect(g, bb[0], bb[1], bb[2], bb[3], CARD);
-                    if (r.type() == 2) {
-                        String pv = r.val().get();
-                        txb(g, f, pv, bb[0] + bb[2] / 2 - twb(f, pv) / 2, bb[1] + 4, WHITE);
-                    } else {
-                        tx(g, f, r.label(), bb[0] + 6, bb[1] + 4, WHITE);
-                        if (r.type() == 1) {
-                            String sv2 = r.val().get();
-                            txb(g, f, sv2, bb[0] + bb[2] - 36 - twb(f, sv2) / 2, bb[1] + 4, 0xFFFFC857);
-                        } else if (r.type() == 3) {
-                            int sx2 = bb[0] + bb[2] - 6 - 18;
-                            g.fill(sx2 - 1, bb[1] + 1, sx2 + 19, bb[1] + 15, EDGE);
-                            g.fill(sx2, bb[1] + 2, sx2 + 18, bb[1] + 14, r.color().getAsInt());
-                        }
-                    }
-                }
-                int ny = lay[lay.length - 1][1] + 22;
-                switch (stSub) {
-                    case 0 -> {
-                        small(g, f, "Preview", cx0, ny - 4, MUTED, false);
-                        chatPreview(g, f, cx0, ny + 6);
-                    }
-                    case 1 -> {
-                        small(g, f, hideOn ? "Filter is on: payments under " + money(HIDE_MINS[hideMinIdx]) + " are hidden." : "Filter is off: all payments are shown.", cx0, ny, WHITE, false);
-                        small(g, f, "Hidden payments still count for the profit and the popup.", cx0, ny + 10, MUTED, false);
-                    }
-                    case 3 -> small(g, f, "/win adds one and /lose resets it. Click a color square to change it.", cx0, ny, MUTED, false);
-                    case 6 -> {
-                        String shown = String.join(" | ", java.util.Arrays.stream(OV_LINES).filter(q -> !q.isEmpty()).toList());
-                        small(g, f, fit(f, "Set the lines in chat: /paydash line 1 <text>.   Now: " + (shown.isEmpty() ? "no lines yet" : shown), (int) (cwt / 0.7f)), cx0, ny, MUTED, false);
-                    }
-                    case 7 -> small(g, f, "Plays when a popup shows or a confirm screen opens. Try the Preview buttons.", cx0, ny, MUTED, false);
-                    case 8 -> {
-                        small(g, f, "It never sends anything. After CONFIRM, press T, Up, then Enter", cx0, ny, MUTED, false);
-                        small(g, f, "to send the payment yourself. The test closes this menu.", cx0, ny + 10, MUTED, false);
-                    }
-                    case 2, 4, 5 -> small(g, f, "Click a color square to step through the colors.", cx0, ny, MUTED, false);
-                    default -> { }
-                }
-            } else if (tab == 6) {
-                // ---- themes ----
-                int gCell = (mw - 8) / 3;
-                for (int i = 0; i < THEME_NAMES.length; i++) {
-                    int gx = x0 + (i % 3) * (gCell + 4), gy = py + 54 + (i / 3) * 21;
-                    boolean sel = theme == i;
-                    rrect(g, gx, gy, gCell, 18, sel ? PURPLE : CARD);
-                    if (!sel) frame(g, gx, gy, gCell, 18, EDGE);
-                    g.fillGradient(gx + 5, gy + 4, gx + 23, gy + 14, THEME_COL[i][0], THEME_COL[i][1]);
-                    if (sel) txb(g, f, THEME_NAMES[i], gx + 29, gy + 5, WHITE); else tx(g, f, THEME_NAMES[i], gx + 29, gy + 5, WHITE);
+                if (fl.isEmpty()) tx(g, f, ITEMS.isEmpty() ? "Open this inside a world to load the items." : "No items match that search.", aRX + 8, py + 96, MUTED);
+                small(g, f, fl.size() + " items    page " + (itemPage + 1) + " of " + pages, aRX + 8, py + 178, MUTED, false);
+
+                // right: top bidders
+                rrect(g, aRX, py + 194, aRW, 62, CARD);
+                spaced(g, f, "TOP BIDDERS", aRX + 8, py + 199, WHITE);
+                List<Map.Entry<String, Double>> bl = new ArrayList<>(aucBids.entrySet());
+                bl.sort((e1, e2) -> Double.compare(e2.getValue(), e1.getValue()));
+                if (bl.isEmpty()) tx(g, f, "No bids yet", aRX + 8, py + 215, MUTED);
+                for (int i = 0; i < 3 && i < bl.size(); i++) {
+                    int ry = py + 213 + i * 13;
+                    String amt = money2(bl.get(i).getValue());
+                    tx(g, f, fit(f, bl.get(i).getKey(), aRW - 30 - twb(f, amt)), aRX + 8, ry, WHITE);
+                    txb(g, f, amt, aRX + aRW - 8 - twb(f, amt), ry, tcol);
                 }
             } else if (tab == 3) {
                 // ---- rakeback (read from the balance HUD mod) ----
@@ -2018,27 +2102,7 @@ public class PayDashClient implements ClientModInitializer {
                 small(g, f, "These switches control your Balance HUD mod, so it needs its latest update installed too.", x0, py + 182, MUTED, false);
             }
 
-            // our own look for the buttons (the real, invisible buttons still receive the clicks)
-            for (Btn b : btns) {
-                if (!b.visible().getAsBoolean()) continue;
-                Button w = b.w();
-                int bx = b.vx(), by = b.vy(), bw = b.vw(), bh = b.vh();
-                boolean act = b.active().getAsBoolean(), hov = w.isHovered();
-                if (b.label().equals("#chip") || b.label().equals("#theme") || b.label().equals("#sub") || b.label().equals("#swatch")) continue;
-                if (b.toggle()) {
-                    pill(g, bx, by, bw, bh, act ? PURPLE : 0xFF241C3E);
-                    int kr = bh / 2 - 2;
-                    int kcx = act ? bx + bw - bh / 2 : bx + bh / 2;
-                    disc(g, kcx, by + bh / 2, kr, act ? 0xFF14102A : MUTED);
-                    continue;
-                }
-                boolean danger = b.label().equals("RESET SESSION");
-                rrect(g, bx, by, bw, bh, act ? PURPLE : (hov ? 0xFF1F1740 : CARD));
-                frame(g, bx, by, bw, bh, danger ? RED : (act ? PURPLE_EDGE : (hov ? 0xFF6B54B5 : EDGE)));
-                int col = danger ? RED : (act ? WHITE : (hov ? WHITE : MUTED));
-                int lw = (int) (twb(f, b.label()) * 0.7f);
-                small(g, f, b.label(), bx + (bw - lw) / 2, by + (bh - 6) / 2, col, true);
-            }
+            drawButtons(g, f, false);
         }
 
         void card(GuiGraphicsExtractor g, Font f, int x, int y, int w, int h, String label, String value, String sub, int accent) {
